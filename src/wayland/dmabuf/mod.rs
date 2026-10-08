@@ -632,6 +632,7 @@ impl DmabufState {
             Some(formats),
             None,
             filter,
+            3,
         )
     }
 
@@ -677,6 +678,39 @@ impl DmabufState {
             None,
             Some(default_feedback),
             filter,
+            6,
+        )
+    }
+
+    /// Creates a dmabuf global with the specified default feedback, advertised at `max_version`
+    /// (4 to 6) instead of the latest.
+    ///
+    /// Some clients bind the advertised version without supporting it; GTK 4.18, for one, binds v6
+    /// and then expects the `main_device` event that v6 removed. Advertising v5 keeps those clients
+    /// working while still giving them feedback.
+    ///
+    /// Clients binding to version 3 or lower will receive the formats from the main tranche.
+    pub fn create_global_with_filter_and_default_feedback_and_version<D, F>(
+        &mut self,
+        display: &DisplayHandle,
+        default_feedback: &DmabufFeedback,
+        filter: F,
+        max_version: u32,
+    ) -> DmabufGlobal
+    where
+        D: GlobalDispatch<zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1, DmabufGlobalData>
+            + BufferHandler
+            + DmabufHandler
+            + 'static,
+        F: for<'c> Fn(&'c Client) -> bool + Send + Sync + 'static,
+    {
+        assert!((4..=6).contains(&max_version), "dmabuf feedback needs version 4 to 6");
+        self.create_global_with_filter_and_optional_default_feedback::<D, _>(
+            display,
+            None,
+            Some(default_feedback),
+            filter,
+            max_version,
         )
     }
 
@@ -686,6 +720,7 @@ impl DmabufState {
         formats: Option<Vec<Format>>,
         default_feedback: Option<&DmabufFeedback>,
         filter: F,
+        feedback_version: u32,
     ) -> DmabufGlobal
     where
         D: GlobalDispatch<zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1, DmabufGlobalData>
@@ -713,7 +748,7 @@ impl DmabufState {
             );
 
         let formats = Arc::new(formats);
-        let version = if default_feedback.is_some() { 6 } else { 3 };
+        let version = if default_feedback.is_some() { feedback_version } else { 3 };
 
         let known_default_feedbacks = Arc::new(Mutex::new(Vec::new()));
         let default_feedback = default_feedback.map(|f| Arc::new(Mutex::new(f.clone())));
