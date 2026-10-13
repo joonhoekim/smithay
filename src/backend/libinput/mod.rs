@@ -881,7 +881,10 @@ impl EventSource for LibinputInputBackend {
 
     fn before_sleep(&mut self) -> calloop::Result<Option<(Readiness, Token)>> {
         self.queued.extend(&mut self.context);
-        Ok(self.token.filter(|_| !self.queued.is_empty()).map(|token| (Readiness::EMPTY, token)))
+        Ok(self
+            .token
+            .filter(|_| !self.queued.is_empty())
+            .map(|token| (Readiness::EMPTY, token)))
     }
 
     fn register(&mut self, poll: &mut Poll, factory: &mut TokenFactory) -> calloop::Result<()> {
