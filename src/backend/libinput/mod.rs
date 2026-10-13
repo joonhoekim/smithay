@@ -31,6 +31,9 @@ pub struct LibinputInputBackend {
     context: libinput::Libinput,
     token: Option<Token>,
     span: tracing::Span,
+    // Events libinput queued without its fd turning readable (the devices `udev_assign_seat`
+    // or `resume` add), taken before the loop sleeps.
+    queued: std::collections::VecDeque<libinput::Event>,
 }
 
 impl LibinputInputBackend {
@@ -47,6 +50,7 @@ impl LibinputInputBackend {
             context,
             token: None,
             span,
+            queued: Default::default(),
         }
     }
 
@@ -719,7 +723,7 @@ impl EventSource for LibinputInputBackend {
             let _guard = self.span.enter();
             self.context.dispatch()?;
 
-            for event in &mut self.context {
+            for event in self.queued.drain(..).chain(&mut self.context) {
                 match event {
                     libinput::Event::Device(device_event) => match device_event {
                         event::DeviceEvent::Added(device_added_event) => {
@@ -871,6 +875,13 @@ impl EventSource for LibinputInputBackend {
         }
 
         Ok(PostAction::Continue)
+    }
+
+    const NEEDS_EXTRA_LIFECYCLE_EVENTS: bool = true;
+
+    fn before_sleep(&mut self) -> calloop::Result<Option<(Readiness, Token)>> {
+        self.queued.extend(&mut self.context);
+        Ok(self.token.filter(|_| !self.queued.is_empty()).map(|token| (Readiness::EMPTY, token)))
     }
 
     fn register(&mut self, poll: &mut Poll, factory: &mut TokenFactory) -> calloop::Result<()> {
