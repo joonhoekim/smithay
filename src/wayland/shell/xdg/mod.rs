@@ -1964,6 +1964,11 @@ impl PopupSurface {
     ) {
         let _span = trace_span!("xdg-popup pre-commit", surface = %surface.id()).entered();
 
+        // Once its xdg_popup is destroyed the wl_surface may still commit; nothing to check then.
+        if !state.xdg_shell_state().known_popups.iter().any(|handle| handle.wl_surface == *surface) {
+            return;
+        }
+
         let res = compositor::with_states(surface, |states| {
             let mut role = states
                 .data_map
