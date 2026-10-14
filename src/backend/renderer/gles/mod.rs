@@ -438,6 +438,8 @@ pub struct GlesFrame<'frame, 'buffer> {
     size: Size<i32, Physical>,
     tex_program_override: Option<(GlesTexProgram, Vec<Uniform<'static>>)>,
     finished: AtomicBool,
+    // Textures sampled since the frame began; they share one fence at `finish`.
+    read: Vec<GlesTexture>,
 
     span: EnteredSpan,
 
@@ -2322,6 +2324,7 @@ impl Renderer for GlesRenderer {
             size: output_size,
             tex_program_override: None,
             finished: AtomicBool::new(false),
+            read: Vec::new(),
 
             span,
 
@@ -2563,6 +2566,15 @@ impl GlesFrame<'_, '_> {
         unsafe {
             self.renderer.gl.Disable(ffi::SCISSOR_TEST);
             self.renderer.gl.Disable(ffi::BLEND);
+        }
+
+        if !self.read.is_empty() {
+            let fence = ReadFence::new(&self.renderer.gl, self.renderer.gles_cleanup().sender.clone());
+            for tex in self.read.drain(..) {
+                if let Ok(sync) = tex.0.sync.try_read() {
+                    sync.update_read(&fence);
+                }
+            }
         }
 
         if let GlesTargetInternal::Texture { sync_lock, .. } = &mut self.target.0 {
@@ -3095,7 +3107,7 @@ impl GlesFrame<'_, '_> {
             drop(scope);
 
             if self.renderer.capabilities.contains(&Capability::Fencing) {
-                sync_lock.update_read(gl);
+                self.read.push(tex.clone());
             } else if self.renderer.egl.is_shared() {
                 gl.Finish();
             };

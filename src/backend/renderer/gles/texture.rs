@@ -62,9 +62,35 @@ impl GlesTexture {
     }
 }
 
+/// A fence placed after a frame's draws, shared by every texture the frame sampled.
+#[derive(Debug)]
+pub(super) struct ReadFence {
+    sync: ffi::types::GLsync,
+    destruction_callback_sender: Sender<CleanupResource>,
+}
+unsafe impl Send for ReadFence {}
+unsafe impl Sync for ReadFence {}
+
+impl ReadFence {
+    pub(super) fn new(gl: &Gles2, destruction_callback_sender: Sender<CleanupResource>) -> Arc<Self> {
+        Arc::new(ReadFence {
+            sync: unsafe { gl.FenceSync(ffi::SYNC_GPU_COMMANDS_COMPLETE, 0) },
+            destruction_callback_sender,
+        })
+    }
+}
+
+impl Drop for ReadFence {
+    fn drop(&mut self) {
+        let _ = self
+            .destruction_callback_sender
+            .send(CleanupResource::Sync(self.sync as *const _));
+    }
+}
+
 #[derive(Debug, Default)]
 pub(super) struct TextureSync {
-    read_sync: Mutex<Option<ffi::types::GLsync>>,
+    read_sync: Mutex<Option<Arc<ReadFence>>>,
     write_sync: Mutex<Option<ffi::types::GLsync>>,
 }
 
@@ -89,20 +115,23 @@ impl TextureSync {
         }
     }
 
-    pub(super) fn update_read(&self, gl: &Gles2) {
-        let mut read_sync = self.read_sync.lock().unwrap();
-        if let Some(old) = read_sync.take() {
-            unsafe {
-                gl.WaitSync(old, 0, ffi::TIMEOUT_IGNORED);
-                gl.DeleteSync(old);
-            };
-        }
-        *read_sync = Some(unsafe { gl.FenceSync(ffi::SYNC_GPU_COMMANDS_COMPLETE, 0) });
+    pub(super) fn update_read(&self, fence: &Arc<ReadFence>) {
+        *self.read_sync.lock().unwrap() = Some(fence.clone());
     }
 
     pub(super) fn wait_for_all(&mut self, gl: &Gles2) {
+        let read_sync = self.read_sync.get_mut().unwrap();
+        if let Some(fence) = read_sync.as_ref() {
+            unsafe {
+                match gl.ClientWaitSync(fence.sync, 0, 0) {
+                    ffi::ALREADY_SIGNALED | ffi::CONDITION_SATISFIED => {
+                        let _ = read_sync.take();
+                    }
+                    _ => gl.WaitSync(fence.sync, 0, ffi::TIMEOUT_IGNORED),
+                }
+            }
+        }
         unsafe {
-            wait_for_syncpoint(self.read_sync.get_mut().unwrap(), gl);
             wait_for_syncpoint(self.write_sync.get_mut().unwrap(), gl);
         }
     }
@@ -141,11 +170,7 @@ impl Drop for GlesTextureInternal {
             .destruction_callback_sender
             .send(CleanupResource::Texture(self.texture));
         let mut sync = self.sync.write().unwrap();
-        if let Some(sync) = sync.read_sync.get_mut().unwrap().take() {
-            let _ = self
-                .destruction_callback_sender
-                .send(CleanupResource::Sync(sync as *const _));
-        }
+        let _ = sync.read_sync.get_mut().unwrap().take();
         if let Some(sync) = sync.write_sync.get_mut().unwrap().take() {
             let _ = self
                 .destruction_callback_sender
